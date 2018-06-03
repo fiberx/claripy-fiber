@@ -192,6 +192,13 @@ def concat_simplifier(*args):
             prev_var = args[i].args[2]
             i += 1
 
+    #HZ: A deeper simplification, dealing with concat like 'if A then X[64:56] else Y[64:56] .. if A then X[55:47] else Y[55:47] .. ...'
+    if all([args[i].op == 'If' for i in range(len(args))]) and all([args[i].args[0] is args[0].args[0] for i in range(len(args))]):
+        t = [args[i].args[1] for i in range(len(args))]
+        f = [args[i].args[2] for i in range(len(args))]
+        ret = ast.all_operations.If(args[0].args[0],ast.all_operations.Concat(*t),ast.all_operations.Concat(*f))
+        return ret
+
     # if any(a.op == 'Reverse' for a in args):
     #     simplified = True
     #     args = [a.reversed for a in args]
@@ -316,6 +323,10 @@ def boolean_reverse_simplifier(body):
     if body.length == 8:
         return body
 
+    #HZ: Try to burrow the reverse deep into 'If' ast, which I believe makes life easier. 
+    if body.op == 'If':
+        return ast.all_operations.If(body.args[0],ast.all_operations.Reverse(body.args[1]),ast.all_operations.Reverse(body.args[2]))
+
     if body.op == 'Concat':
         if all(a.op == 'Extract' for a in body.args):
             first_ast = body.args[0].args[2]
@@ -387,11 +398,21 @@ def _flatten_simplifier(op_name, filter_func, *args):
     if filter_func: new_args = filter_func(new_args)
     return next(a for a in args if isinstance(a, ast.Base)).make_like(op_name, new_args)
 
+#HZ: add utility function
+_is_if_ast = lambda f:isinstance(f,ast.Base) and f.op == 'If'
+_is_constant = lambda f:type(f) in (int,long,float) or (isinstance(f,ast.Base) and not f.symbolic)
+
 def bitwise_add_simplifier(a, b):
     if a is ast.all_operations.BVV(0, a.size()):
         return b
     elif b is ast.all_operations.BVV(0, a.size()):
         return a
+    #HZ: burrow the addition of constants into the 'If' terms, which I believe will simplify the formulas.
+    if _is_if_ast(a) or _is_if_ast(b):
+        fi = a if _is_if_ast(a) else b
+        fo = b if _is_if_ast(a) else a
+        if _is_constant(fo):
+            return ast.all_operations.If(fi.args[0],fi.args[1]+fo,fi.args[2]+fo) 
 
     return _flatten_simplifier('__add__', None, a, b)
 

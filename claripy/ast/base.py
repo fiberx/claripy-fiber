@@ -11,6 +11,8 @@ import logging
 l = logging.getLogger("claripy.ast")
 
 import ana
+import traceback
+import sys
 
 WORKER = bool(os.environ.get('WORKER', False))
 md5_unpacker = struct.Struct('2Q')
@@ -220,6 +222,18 @@ class Base(ana.Storable):
             tuple(a for a in self.annotations if not a.eliminatable and a.relocatable)
         ))).keys()
 
+        #HZ: we define a new dict 'hz_extra' here to store some additional data we need for each AST.
+        #Possible general keys:
+        #'processed' --> whether this ast has been processed by get_formula()
+        #'type' --> the type of the ast, currently we have 'mem','reg' and 'ret'
+        #'name' --> the human-readable name for this ast
+        #Type specific keys:
+        #MEM: 'mem_formula' --> origination ast
+        #REG: currently none.
+        #RET: 'func_name' --> function name | 'func_addr' --> ast of the function addr | 'calling_addr' --> calling instruction's addr
+        #NOTE: We CANNOT put this in __new__() cause it may clear existing AST's hz_extra.
+        self.hz_extra = {}
+
         if len(args) == 0:
             raise ClaripyOperationError("AST with no arguments!")
 
@@ -259,20 +273,22 @@ class Base(ana.Storable):
     # Serialization support
     #
 
+    #HZ: add serialization/deserialization support for new member hz_extra
     def _ana_getstate(self):
         """
         Support for ANA serialization.
         """
-        return self.op, self.args, self.length, self.variables, self.symbolic, self._hash, self.annotations
+        return self.op, self.args, self.length, self.variables, self.symbolic, self._hash, self.annotations, self.hz_extra
 
     def _ana_setstate(self, state):
         """
         Support for ANA deserialization.
         """
-        op, args, length, variables, symbolic, h, annotations = state
+        op, args, length, variables, symbolic, h, annotations, hz_extra = state
         Base.__a_init__(self, op, args, length=length, variables=variables, symbolic=symbolic, annotations=annotations)
         self._hash = h
         Base._hash_cache[h] = self
+        self.hz_extra = hz_extra
 
     #
     # Collapsing and simplification
@@ -404,7 +420,11 @@ class Base(ana.Storable):
     def shallow_repr(self, max_depth=8):
         return self.__repr__(max_depth=max_depth)
 
-    def __repr__(self, inner=False, max_depth=None, explicit_length=False):
+    #HZ: Return a string repr with information in the 'hz_extra'
+    def hz_repr(self,inner=False, max_depth=None, explicit_length=False):
+        return self.__repr__(inner=inner, max_depth=max_depth, explicit_length=explicit_length,hz_display=True)
+
+    def __repr__(self, inner=False, max_depth=None, explicit_length=False, hz_display=False):
         if max_depth is not None and max_depth <= 0:
             return '<...>'
 
@@ -421,6 +441,12 @@ class Base(ana.Storable):
             else:
                 op = self.op
                 args = self.args
+
+            #HZ: If we have processed this AST in our tracer, we should print out the generated human-readable name.
+            if hz_display and self.hz_extra.has_key('name'):
+                args = list(args)
+                o_name = args[0]
+                args[0] = self.hz_extra['name']
 
             if op == 'BVS' and inner:
                 value = args[0]
@@ -448,33 +474,37 @@ class Base(ana.Storable):
                     value = format(self.args[0], '#x')
                 value += ('#' + str(self.length)) if explicit_length else ''
             elif op == 'If':
-                value = 'if {} then {} else {}'.format(_inner_repr(args[0], max_depth=max_depth),
-                                                       _inner_repr(args[1], max_depth=max_depth),
-                                                       _inner_repr(args[2], max_depth=max_depth))
+                value = 'if {} then {} else {}'.format(_inner_repr(args[0], max_depth=max_depth, hz_display=hz_display),
+                                                       _inner_repr(args[1], max_depth=max_depth, hz_display=hz_display),
+                                                       _inner_repr(args[2], max_depth=max_depth, hz_display=hz_display))
                 if inner:
                     value = '({})'.format(value)
             elif op == 'Not':
-                value = '!{}'.format(_inner_repr(args[0], max_depth=max_depth))
+                value = '!{}'.format(_inner_repr(args[0], max_depth=max_depth, hz_display=hz_display))
             elif op == 'Extract':
-                value = '{}[{}:{}]'.format(_inner_repr(args[2], max_depth=max_depth), args[0], args[1])
+                value = '{}[{}:{}]'.format(_inner_repr(args[2], max_depth=max_depth, hz_display=hz_display), args[0], args[1])
             elif op == 'ZeroExt':
-                value = '0#{} .. {}'.format(args[0], _inner_repr(args[1], max_depth=max_depth))
+                value = '0#{} .. {}'.format(args[0], _inner_repr(args[1], max_depth=max_depth, hz_display=hz_display))
                 if inner:
                     value = '({})'.format(value)
             elif op == 'Concat':
-                value = ' .. '.join(_inner_repr(a, explicit_length=True, max_depth=max_depth) for a in self.args)
+                value = ' .. '.join(_inner_repr(a, explicit_length=True, max_depth=max_depth, hz_display=hz_display) for a in self.args)
             elif len(args) == 2 and op in operations.infix:
-                value = '{} {} {}'.format(_inner_repr(args[0], max_depth=max_depth),
+                value = '{} {} {}'.format(_inner_repr(args[0], max_depth=max_depth, hz_display=hz_display),
                                           operations.infix[op],
-                                          _inner_repr(args[1], max_depth=max_depth))
+                                          _inner_repr(args[1], max_depth=max_depth, hz_display=hz_display))
                 if inner:
                     value = '({})'.format(value)
             else:
                 value = "{}({})".format(op,
-                                        ', '.join(_inner_repr(a, max_depth=max_depth) for a in args))
+                                        ', '.join(_inner_repr(a, max_depth=max_depth, hz_display=hz_display) for a in args))
 
             if not inner:
                 value = '<{} {}>'.format(self._type_name(), value)
+
+            #HZ: Recover original args[0]
+            if hz_display and self.hz_extra.has_key('name'):
+                args[0] = o_name
 
             return value
         except RuntimeError:
