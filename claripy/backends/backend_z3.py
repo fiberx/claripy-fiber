@@ -48,7 +48,8 @@ _z3_paths.append("/opt/python/lib")
 _z3_paths.append(os.path.join(sys.prefix, "lib"))
 
 try:
-    z3.z3core.lib()
+    #z3.z3core.lib()
+    pass
 except:
     for z3_path in _z3_paths:
         if not '.so' in z3_path and \
